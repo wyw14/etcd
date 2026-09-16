@@ -1,0 +1,89 @@
+{
+  "task_id": "etcd-io--etcd-pc-4d6387a27c48",
+  "title": "离线比较两份 etcd 快照的业务键变化",
+  "requirement_met": "完成",
+  "effective_turns": 132,
+  "effective_turns_source": "tc_hook_valid_tc_post_tool_use_deduplicated",
+  "rubric_results": {
+    "1": {
+      "rubric_id": "1",
+      "status": "通过",
+      "expected": "提供离线快照比较入口，两侧可分别选择可读取修订号（默认各自最新）并限定键区间，结果注明两侧实际修订与范围。",
+      "actual": "以真实嵌入式 etcd 生成的快照核对两侧请求修订、实际修订、最新修订与范围，控制台报告含 requested_revision=latest 与 Range 行；区间 [start,end)、单零字节开区间、空起点与 --rev-a/--rev-b 选择均按预期生效。",
+      "logs": [
+        "logs/528-independent.log"
+      ],
+      "conclusion": "通过"
+    },
+    "2": {
+      "rubric_id": "2",
+      "status": "通过",
+      "expected": "按键字节序稳定报告新增、删除和变更，并区分值、创建修订、修改修订、版本与租约绑定的变化。",
+      "actual": "三份真实快照比较按 beta、leased、old 的字节序报告 added 与 deleted；在同一真实数据库的不同修订上分别观察到值变化、租约绑定变化与删除后重建的创建修订变化；含非 UTF-8 字节的键仍按原始字节次序输出，三次比较的报告顺序完全一致。",
+      "logs": [
+        "logs/528-independent.log"
+      ],
+      "conclusion": "通过"
+    },
+    "3": {
+      "rubric_id": "3",
+      "status": "通过",
+      "expected": "比较依据所选修订的逻辑数据，正确处理已删除键和多次修改；物理页布局、空闲页或压缩历史差异不产生伪业务差异。",
+      "actual": "同一数据库按服务器报告的真实修订比对，删除前读到旧值、墓碑期间该键报为 added、同事务多次写入取最后一次；压缩前副本与物理压缩后文件的修订与键数相同而状态哈希不同（0xb873ff63 与 0x1d4de2a6），比较结果为空且判定为相等。",
+      "logs": [
+        "logs/528-independent.log"
+      ],
+      "conclusion": "通过"
+    },
+    "4": {
+      "rubric_id": "4",
+      "status": "通过",
+      "expected": "二进制键值可无损表达，同时提供可供程序读取的稳定汇总和明细。",
+      "actual": "写入非 UTF-8 键值后原样返回；解析 JSON 报告的 base64 键字段并回解为原始字节，核对状态为complete、变更数组、汇总计数与两侧存活键数量。",
+      "logs": [
+        "logs/528-independent.log"
+      ],
+      "conclusion": "通过"
+    },
+    "5": {
+      "rubric_id": "5",
+      "status": "通过",
+      "expected": "快照损坏、修订已压缩、输出失败或取消时明确失败且不发布伪完整结果；输入保持只读，处理不把全部键值无界装入内存。",
+      "actual": "未来修订两侧、文件缺失、损坏文件与取消失败时均无任何变更被回调，低于压缩点的修订返回压缩错误；三次比较前后两个输入文件的字节哈希、大小与修改时间均不变；两侧共 64 MiB 值数据下存活堆峰值 18.9 MB、比较后无保留，命令行端到端 24 MiB/侧峰值工作集 123 MiB，失败时输出文件不被发布且不留临时文件。",
+      "logs": [
+        "logs/528-independent.log"
+      ],
+      "conclusion": "通过"
+    },
+    "6": {
+      "rubric_id": "6",
+      "status": "通过",
+      "expected": "既有快照保存、恢复、状态与哈希检查行为和格式保持兼容，相关现有测试继续通过。",
+      "actual": "etcdutl 模块既有用例全部通过；snapshot 子命令仍列出 restore、status、diff，diff 的 --rev-a、--rev-b、--range-start、--range-end、--output、--write-out 均已注册；快照状态系列用例（含固定哈希 0x4b84b1be）继续通过。",
+      "logs": [
+        "logs/528-module-regression.log"
+      ],
+      "conclusion": "通过"
+    }
+  },
+  "verification_commands": [
+    {
+      "command": "go test -count=1 -timeout 2400s -v -run TestZZV528",
+      "cwd": "etcd-io--etcd-pc-4d6387a27c48",
+      "exit_code": 0,
+      "log": "logs/528-independent.log"
+    },
+    {
+      "command": "go test -count=1 -timeout 2400s ./...",
+      "cwd": "etcd-io--etcd-pc-4d6387a27c48",
+      "exit_code": 0,
+      "log": "logs/528-module-regression.log"
+    }
+  ],
+  "run_result": "1 通过 提供离线快照比较入口，两侧可分别选择可读取修订号（默认各自最新）并限定键区间，结果注明两侧实际修订与范围。证据：以真实嵌入式 etcd 生成的快照核对两侧请求修订、实际修订、最新修订与范围，控制台报告含 requested_revision=latest 与 Range 行；区间 [start,end)、单零字节开区间、空起点与 --rev-a/--rev-b 选择均按预期生效。\n2 通过 按键字节序稳定报告新增、删除和变更，并区分值、创建修订、修改修订、版本与租约绑定的变化。证据：三份真实快照比较按 beta、leased、old 的字节序报告 added 与 deleted；在同一真实数据库的不同修订上分别观察到值变化、租约绑定变化与删除后重建的创建修订变化；含非 UTF-8 字节的键仍按原始字节次序输出，三次比较的报告顺序完全一致。\n3 通过 比较依据所选修订的逻辑数据，正确处理已删除键和多次修改；物理页布局、空闲页或压缩历史差异不产生伪业务差异。证据：同一数据库按服务器报告的真实修订比对，删除前读到旧值、墓碑期间该键报为 added、同事务多次写入取最后一次；压缩前副本与物理压缩后文件的修订与键数相同而状态哈希不同（0xb873ff63 与 0x1d4de2a6），比较结果为空且判定为相等。\n4 通过 二进制键值可无损表达，同时提供可供程序读取的稳定汇总和明细。证据：写入非 UTF-8 键值后原样返回；解析 JSON 报告的 base64 键字段并回解为原始字节，核对状态为complete、变更数组、汇总计数与两侧存活键数量。\n5 通过 快照损坏、修订已压缩、输出失败或取消时明确失败且不发布伪完整结果；输入保持只读，处理不把全部键值无界装入内存。证据：未来修订两侧、文件缺失、损坏文件与取消失败时均无任何变更被回调，低于压缩点的修订返回压缩错误；三次比较前后两个输入文件的字节哈希、大小与修改时间均不变；两侧共 64 MiB 值数据下存活堆峰值 18.9 MB、比较后无保留，命令行端到端 24 MiB/侧峰值工作集 123 MiB，失败时输出文件不被发布且不留临时文件。\n6 通过 既有快照保存、恢复、状态与哈希检查行为和格式保持兼容，相关现有测试继续通过。证据：etcdutl 模块既有用例全部通过；snapshot 子命令仍列出 restore、status、diff，diff 的 --rev-a、--rev-b、--range-start、--range-end、--output、--write-out 均已注册；快照状态系列用例（含固定哈希 0x4b84b1be）继续通过。",
+  "summary": "冻结 rubric 六条全部通过：离线快照比较提供修订与区间选择并按字节序报告差异，逻辑数据与物理布局区分正确，二进制键值无损且报告可程序读取，损坏与压缩等失败明确且不发布伪完整结果，既有快照行为与命令行入口保持兼容。",
+  "screenshot_note": "真实验证结论画面：含题目、完整会话、评审者、被评估提交、环境、测试计数、逐条判定与总体结论。",
+  "trajectory_note": "原始会话导出文件，保留原始字节；需求原文与工作目录已核对一致。",
+  "notes": "定向验收测试与回归测试日志保存在验收材料目录。",
+  "artifact_root": "E:\\swe-like\\runs\\_etcd-acceptance"
+}

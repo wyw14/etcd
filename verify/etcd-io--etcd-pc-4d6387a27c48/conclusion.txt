@@ -1,0 +1,62 @@
+========================================================================================================
+验证结论｜截图区域
+项目/题目：etcd-io/etcd  #528 离线比较两份 etcd 快照的业务键变化   task_id：etcd-io--etcd-pc-4d6387a27c48
+完整 Session：
+  3313242430506617:626c568fc1e9116ac272d431088c29b1_6aa955aada143c3bd08cff9d.6aa955acda143c3bd08cffa0.6aa955aada143c3bd08cff9e:TraeCode CN.3.3.100.no_sid.no_ppe.T(2026/9/15 22:26:52)
+验收日期：2026-09-16    评审者：本次独立验收（脚本化定向 Go 测试 + 真实命令行端到端验证）
+被评估提交：运行副本尚无提交，基线 e9e56564d6f13af87747cdb785bc1832791090b4
+  模型改动补丁 model.patch SHA-256 e6a92730d48ea164b1df07ee32d662f0d077624af77b9636e5a7a62ee56f3640
+--------------------------------------------------------------------------------------------------------
+环境：Windows 11 (amd64) / Go 1.26.2 windows/amd64 / 仓库 etcd-io/etcd（etcdutl 模块）
+      运行工作目录 precheck-528，分支 swe-like/legacy-20260904/etcd-t01
+有效轮数：132（tc-hook-kit valid_tc，PostToolUse+tool_use_id 去重，final_count_ready=true）
+独立验收测试：snapshot 包 8 个测试（含 22 个子测试）全部通过，失败 0；etcdutl 包 4 个测试
+      （含 19 个子测试）全部通过，失败 0；错误 0，跳过 0
+模型自测：同题 snapshot 包 13 组、命令层 8 组用例全部通过
+回归测试：etcdutl 模块既有用例全部通过；独立测试另在 -race 之外重跑命令层退出码与文件发布语义
+--------------------------------------------------------------------------------------------------------
+Rubric 逐条判定（按冻结判据顺序，每条只出现一次）：
+[1] f2p 提供离线快照比较入口，可为两侧分别选择可读取修订号（默认各自最新）并限定键区间，
+        结果注明两侧实际修订与范围
+     实际：通过。TestZZV528RealSnapshotComparison 用真实嵌入式 etcd 生成的快照核对
+           RequestedRevision/Revision/LatestRevision 与 Range；TestZZV528CLIEndToEnd 验证
+           console 报告含 requested_revision=latest 与 range；TestZZV528KeyRangeAndRevisionSelection
+           覆盖 [start,end)、单零字节开区间、空起点与 --rev-a/--rev-b 选择
+[2] f2p 按键字节序稳定报告新增、删除和变更，并能区分值、创建修订、修改修订、版本及租约绑定的变化
+     实际：通过。TestZZV528RealSnapshotComparison 核对 added/deleted 与按键字节序输出；
+           attribute_dimensions 在同一真实数据库的不同修订上分别验证值变化、租约绑定变化、
+           删除后重建的创建修订变化；TestZZV528ExplicitFailureAndBinaryLossless 用二进制键
+           验证 raw byte 次序；TestZZV528DeterministicOrdering 三次比较顺序完全一致
+[3] f2p 比较依据所选修订的逻辑数据，正确处理已删除键和多次修改；物理页布局、空闲页或压缩历史
+        差异不会产生伪业务差异
+     实际：通过。TestZZV528LogicalHistory 在同一数据库上按服务器报告的真实修订比对，验证
+           删除前的值、墓碑期间的 added、同事务多次写入取最后一次 sub；TestZZV528PhysicalLayoutIsNotADifference
+           用「压缩前副本 vs 物理压缩后文件」对比，两者 revision/键数相同而 Status Hash 不同
+           （0xb873ff63 vs 0x1d4de2a6），比较结果为空且 Equal=true
+[4] f2p 二进制键值可无损表达，同时提供可供程序读取的稳定汇总和明细
+     实际：通过。TestZZV528ExplicitFailureAndBinaryLossless 写入非 UTF-8 键值并校验原样返回；
+           TestZZV528CLIEndToEnd 解析 JSON 报告的 base64 键字段并回解为原始字节，核对
+           status=complete、changes 数组、summary 计数与 live keys
+[5] f2p 快照损坏、修订已压缩、输出失败或取消时明确失败且不发布伪完整结果；输入保持只读，
+        处理不要求将全部键值无界装入内存
+     实际：通过。TestZZV528ExplicitFailureAndBinaryLossless 覆盖未来修订两侧、文件缺失、损坏
+           文件与 context 取消，均无任何 change 被回调；TestZZV528PhysicalLayoutIsNotADifference
+           验证低于压缩点的修订返回 ErrRevisionCompacted；TestZZV528SnapshotFileFingerprintIsStable
+           三次比较前后两个输入的字节哈希、大小与修改时间均不变；TestZZV528MemoryDoesNotScaleWithValueVolume
+           在两侧共 64 MiB 值数据下实测存活堆峰值 18.9 MB、比较后无保留，cli 端到端
+           24 MiB/侧实测峰值工作集 123 MiB
+[6] p2p 既有快照保存、恢复、状态与哈希检查行为和格式保持兼容，相关现有测试继续通过
+     实际：通过。go test ./... 覆盖 etcdutl/v3 与 snapshot 包既有用例全部通过；
+           TestZZV528CLIHelpAndRegistration 确认 snapshot 子命令仍列出 restore/status/diff 且
+           diff 的 --rev-a/--rev-b/--range-start/--range-end/--output/--write-out 均已注册；
+           snapshot 包既有 TestSnapshotStatus 系列（含固定哈希 0x4b84b1be）继续通过
+--------------------------------------------------------------------------------------------------------
+总体结论：完成。冻结 rubric 六条的核心、兼容与回归项均满足，未发现本次改动引入的质量门失败。
+主要缺陷/缺失证据：
+  1) 环境限定限制（非本改动引入）：Windows 下 core.symlinks=false 使 client/v3 的 11 个
+     git 符号链接被检出为占位文本，导致依赖该模块的包无法加载；验收时临时以索引中记录的
+     目标文件还原同名链接目标，验证结束后已按索引字节原样还原，工作树变更集与验证前一致。
+  2) 未覆盖项：未在 Linux 上重复执行同一套测试，跨平台行为以本机结果为准。
+Type 资格：有效轮数 132（> 100）。
+========================================================================================================
+—— 验证结论结束 ——
