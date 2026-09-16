@@ -1,0 +1,26 @@
+﻿            testing.go:1464: TempDir RemoveAll cleanup: unlinkat C:\Users\wyw\AppData\Local\Temp\TestZZVAdv530ConcurrentBindingMustNotPanic854191284\001\etcd_backend_test751274002\database: The process cannot access the file because it is being used by another process.
+        panic: unexpected error from lease Attach [recovered, repanicked]
+        
+        goroutine 82 [running]:
+        testing.tRunner.func1.2({0x7ff72909fb00, 0x7ff72924a9a0})
+        	C:/Program Files/Go/src/testing/testing.go:1974 +0x239
+        testing.tRunner.func1()
+        	C:/Program Files/Go/src/testing/testing.go:1977 +0x349
+        panic({0x7ff72909fb00?, 0x7ff72924a9a0?})
+        	C:/Program Files/Go/src/runtime/panic.go:860 +0x13a
+        go.etcd.io/etcd/server/v3/storage/mvcc.(*storeTxnWrite).put(0x2d06adc38720, {0x2d06ada28100, 0xe, 0x10}, {0x2d06ada28110, 0x1, 0x8}, 0x5)
+        	E:/swe-like/runs/etcd-io--etcd/e9e56564d6f1/precheck-530/server/storage/mvcc/kvstore_txn.go:287 +0xdc5
+        go.etcd.io/etcd/server/v3/storage/mvcc.(*storeTxnWrite).Put(0x2d06adc38720, {0x2d06ada28100?, 0x1?, 0x2d06adcbbd70?}, {0x2d06ada28110?, 0x1?, 0x8?}, 0x2d06ada28110?)
+        	E:/swe-like/runs/etcd-io--etcd/e9e56564d6f1/precheck-530/server/storage/mvcc/kvstore_txn.go:205 +0x25
+        go.etcd.io/etcd/server/v3/storage/mvcc.(*metricsTxnWrite).Put(0x2d06adc50a90?, {0x2d06ada28100?, 0x1?, 0x2d06adc01420?}, {0x2d06ada28110?, 0x2d06adb78960?, 0x2d06adcbbde8?}, 0x7ff7289ef93f?)
+        	E:/swe-like/runs/etcd-io--etcd/e9e56564d6f1/precheck-530/server/storage/mvcc/metrics_txn.go:53 +0x35
+        go.etcd.io/etcd/server/v3/lease_test.zzvAdvPut(0x2d06adc509c0?, {0x7ff729260b10, 0x2d06adc50a90}, {0x7ff7291fd883, 0xe}, {0x7ff7292465b8, 0x1}, 0x5)
+        	E:/swe-like/runs/etcd-io--etcd/e9e56564d6f1/precheck-530/server/lease/zzvadv530_test.go:81 +0xf5
+        go.etcd.io/etcd/server/v3/lease_test.zzvAdvConcurrentBindingChild(0x2d06adcaa200)
+        	E:/swe-like/runs/etcd-io--etcd/e9e56564d6f1/precheck-530/server/lease/zzvadv530_test.go:297 +0x3f3
+        go.etcd.io/etcd/server/v3/lease_test.TestZZVAdv530ConcurrentBindingMustNotPanic(0x2d06adcaa200)
+        	E:/swe-like/runs/etcd-io--etcd/e9e56564d6f1/precheck-530/server/lease/zzvadv530_test.go:248 +0x4b
+        testing.tRunner(0x2d06adcaa200, 0x7ff729243768)
+        	C:/Program Files/Go/src/testing/testing.go:2036 +0xc3
+        created by testing.(*T).Run in goroutine 1
+        	C:/Program Files/Go/src/testing/testing.go:2101 +0x4a9

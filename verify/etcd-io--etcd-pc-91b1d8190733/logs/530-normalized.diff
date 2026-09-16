@@ -1,0 +1,484 @@
+﻿diff --git a/etcdutl/etcdutl/common.go b/etcdutl/etcdutl/common.go
+index e6b09efb7..b10f383af 100644
+--- a/etcdutl/etcdutl/common.go
++++ b/etcdutl/etcdutl/common.go
+@@ -89,8 +89,16 @@ func (sl *SimpleLessor) Grant(id lease.LeaseID, ttl int64) (*lease.Lease, error)
+ }
+ 
+ func (sl *SimpleLessor) Revoke(id lease.LeaseID) error { return nil }
+ 
++// PreviewProtectedRevoke is unsupported by the offline simple lessor.
++func (sl *SimpleLessor) PreviewProtectedRevoke(id lease.LeaseID) (*lease.ProtectedRevokePreview, error) {
++	return nil, lease.ErrLeaseNotFound
++}
++
++// ProtectedRevoke mirrors the permissive Revoke behavior of the simple lessor.
++func (sl *SimpleLessor) ProtectedRevoke(token lease.ProtectedRevokeToken) error { return nil }
++
+ func (sl *SimpleLessor) Checkpoint(id lease.LeaseID, remainingTTL int64) error { return nil }
+ 
+ func (sl *SimpleLessor) Attach(id lease.LeaseID, items []lease.LeaseItem) error { return nil }
+ 
+diff --git a/server/lease/lease.go b/server/lease/lease.go
+index 8f194c980..66f213f32 100644
+--- a/server/lease/lease.go
++++ b/server/lease/lease.go
+@@ -15,8 +15,9 @@
+ package lease
+ 
+ import (
+ 	"math"
++	"sort"
+ 	"sync"
+ 	"time"
+ 
+ 	"go.etcd.io/etcd/server/v3/lease/leasepb"
+@@ -32,12 +33,29 @@ type Lease struct {
+ 	expiryMu sync.RWMutex
+ 	// expiry is time when lease should expire. no expiration when expiry.IsZero() is true
+ 	expiry time.Time
+ 
+-	// mu protects concurrent accesses to itemSet
++	// mu protects concurrent accesses to itemSet and bindingVersion
+ 	mu      sync.RWMutex
+ 	itemSet map[LeaseItem]struct{}
+-	revokec chan struct{}
++	// bindingVersion is bumped every time the attached item set changes, i.e.
++	// when a new item is attached or an attached item is detached. Re-attaching
++	// an item that is already attached (e.g. rewriting the value of a key that
++	// is already bound to the lease) and lease renewals do not bump it. It is
++	// used to invalidate protected-revoke credentials; detaching a key and
++	// later re-attaching it bumps the version twice, even if the resulting
++	// item set is identical.
++	bindingVersion uint64
++	// instance uniquely identifies one granted lease instance. A lease granted
++	// after a previous lease with the same ID was revoked gets a different
++	// instance. The value is assigned deterministically (in raft apply order)
++	// so all cluster members make the same protected-revoke decision.
++	instance uint64
++	// revoking is set by ProtectedRevoke once the credential has been accepted,
++	// freezing the lease against new bindings for the duration of the deletion.
++	// It is guarded by the lessor mutex.
++	revoking bool
++	revokec  chan struct{}
+ }
+ 
+ func NewLease(id LeaseID, ttl int64) *Lease {
+ 	return &Lease{
+@@ -112,8 +130,73 @@ func (l *Lease) Keys() []string {
+ 	l.mu.RUnlock()
+ 	return keys
+ }
+ 
++// attachItemsLocked adds the given items to the lease's binding set. It returns
++// true when at least one item was not attached before, i.e. when the binding
++// relationship changed. bindingVersion is bumped exactly once in that case, so
++// re-attaching an already attached item (e.g. rewriting the value of a bound
++// key) does not invalidate protected-revoke credentials.
++// The caller must hold l.mu.
++func (l *Lease) attachItemsLocked(items []LeaseItem) (changed bool) {
++	for _, it := range items {
++		if _, ok := l.itemSet[it]; !ok {
++			l.itemSet[it] = struct{}{}
++			changed = true
++		}
++	}
++	if changed {
++		l.bindingVersion++
++	}
++	return changed
++}
++
++// detachItemsLocked removes the given items from the lease's binding set. It
++// returns true when at least one item was attached before. Detaching a key and
++// re-attaching it later bumps the binding version twice, even if the resulting
++// binding set is identical to the original.
++// The caller must hold l.mu.
++func (l *Lease) detachItemsLocked(items []LeaseItem) (changed bool) {
++	for _, it := range items {
++		if _, ok := l.itemSet[it]; ok {
++			delete(l.itemSet, it)
++			changed = true
++		}
++	}
++	if changed {
++		l.bindingVersion++
++	}
++	return changed
++}
++
++// bindingSnapshot returns a sorted copy of the keys attached to the lease and
++// the current binding version. The two values are read together so callers can
++// trust that the returned keys correspond to the returned version.
++func (l *Lease) bindingSnapshot() (keys []string, bindingVersion uint64) {
++	l.mu.RLock()
++	defer l.mu.RUnlock()
++	keys = make([]string, 0, len(l.itemSet))
++	for k := range l.itemSet {
++		keys = append(keys, k.Key)
++	}
++	sort.Strings(keys)
++	return keys, l.bindingVersion
++}
++
++// Instance returns the opaque identity of this granted lease instance. It is
++// immutable for the lifetime of the Lease object.
++func (l *Lease) Instance() uint64 {
++	return l.instance
++}
++
++// BindingVersion returns the current version of the lease's binding set. The
++// version is bumped on every actual attach/detach change.
++func (l *Lease) BindingVersion() uint64 {
++	l.mu.RLock()
++	defer l.mu.RUnlock()
++	return l.bindingVersion
++}
++
+ // Remaining returns the remaining time of the lease.
+ func (l *Lease) Remaining() time.Duration {
+ 	l.expiryMu.RLock()
+ 	defer l.expiryMu.RUnlock()
+diff --git a/server/lease/lessor.go b/server/lease/lessor.go
+index 67472eca5..866060dd2 100644
+--- a/server/lease/lessor.go
++++ b/server/lease/lessor.go
+@@ -60,8 +60,21 @@ var (
+ 	ErrNotPrimary       = errors.New("not a primary lessor")
+ 	ErrLeaseNotFound    = errors.New("lease not found")
+ 	ErrLeaseExists      = errors.New("lease already exists")
+ 	ErrLeaseTTLTooLarge = errors.New("too large lease TTL")
++
++	// ErrProtectedRevokeTokenInvalid is returned when ProtectedRevoke receives
++	// a malformed token that could never have been issued by a preview.
++	ErrProtectedRevokeTokenInvalid = errors.New("invalid protected revoke token")
++	// ErrLeaseInstanceMismatch is returned when the lease with the token's ID
++	// is not the same instance the preview was taken for (e.g. the original
++	// lease was revoked and a new lease with the same ID was granted).
++	ErrLeaseInstanceMismatch = errors.New("lease is not the same instance as the protected revoke preview")
++	// ErrLeaseBindingsChanged is returned when keys were attached to, or
++	// detached from, the lease after the preview was taken. Detaching a key and
++	// re-attaching it also invalidates the token, even if the final key set is
++	// identical to the previewed one.
++	ErrLeaseBindingsChanged = errors.New("lease bindings changed since the protected revoke preview")
+ )
+ 
+ // TxnDelete is a TxnWrite that only permits deletes. Defined here
+ // to avoid circular dependency with mvcc.
+@@ -94,8 +107,34 @@ type Lessor interface {
+ 	// given lease will be removed. If the ID does not exist, an error
+ 	// will be returned.
+ 	Revoke(id LeaseID) error
+ 
++	// PreviewProtectedRevoke returns a protected-revoke preview for a lease:
++	// its identity, the keys currently bound to it, and a credential required
++	// by ProtectedRevoke. Taking a preview does not modify any state and leaves
++	// no server-side state behind. Callers are responsible for authorizing the
++	// caller (e.g. verifying revoke/put permissions on every returned key).
++	// If the ID does not exist, ErrLeaseNotFound is returned.
++	PreviewProtectedRevoke(id LeaseID) (*ProtectedRevokePreview, error)
++
++	// ProtectedRevoke revokes a lease using the credential from
++	// PreviewProtectedRevoke. Revoke succeeds only when the lease still exists
++	// as the same instance and its binding set has not changed since the
++	// preview. The credential check and the deletion form a single atomic
++	// decision with respect to Attach/Detach: a key bound to the lease after
++	// the preview can never be deleted by this call.
++	//
++	// Possible definite results:
++	//   - nil: the lease and exactly the previewed bindings are gone;
++	//   - ErrLeaseNotFound: the lease expired, was already revoked, or never
++	//     existed (this is also the result of a duplicate revoke);
++	//   - ErrLeaseInstanceMismatch: the lease ID was reused by a new grant;
++	//   - ErrLeaseBindingsChanged: a binding changed after the preview;
++	//   - ErrProtectedRevokeTokenInvalid: the token is malformed.
++	//
++	// ProtectedRevoke never renews a lease and cannot restore an expired one.
++	ProtectedRevoke(token ProtectedRevokeToken) error
++
+ 	// Checkpoint applies the remainingTTL of a lease. The remainingTTL is used in Promote to set
+ 	// the expiry of leases to less than the full TTL when possible.
+ 	Checkpoint(id LeaseID, remainingTTL int64) error
+ 
+@@ -153,8 +192,13 @@ type lessor struct {
+ 	leaseExpiredNotifier *LeaseExpiredNotifier
+ 	leaseCheckpointHeap  LeaseQueue
+ 	itemMap              map[LeaseItem]LeaseID
+ 
++	// nextLeaseInstance assigns deterministic, unique instance identities to
++	// leases granted (or recovered) by this lessor. It is only accessed while
++	// holding mu.
++	nextLeaseInstance uint64
++
+ 	// When a lease expires, the lessor will delete the
+ 	// leased range (or key) by the RangeDeleter.
+ 	rd RangeDeleter
+ 
+@@ -301,8 +345,13 @@ func (le *lessor) Grant(id LeaseID, ttl int64) (*Lease, error) {
+ 	if l.ttl < le.minLeaseTTL {
+ 		l.ttl = le.minLeaseTTL
+ 	}
+ 
++	// Assign a fresh instance identity. Grants go through raft, so the
++	// counter advances in the same order on every member.
++	le.nextLeaseInstance++
++	l.instance = le.nextLeaseInstance
++
+ 	if le.isPrimary() {
+ 		l.refresh(0)
+ 	} else {
+ 		l.forever()
+@@ -363,8 +412,100 @@ func (le *lessor) Revoke(id LeaseID) error {
+ 	leaseRevoked.Inc()
+ 	return nil
+ }
+ 
++func (le *lessor) PreviewProtectedRevoke(id LeaseID) (*ProtectedRevokePreview, error) {
++	le.mu.RLock()
++	l := le.leaseMap[id]
++	le.mu.RUnlock()
++	if l == nil {
++		return nil, ErrLeaseNotFound
++	}
++
++	keys, bindingVersion := l.bindingSnapshot()
++	return &ProtectedRevokePreview{
++		LeaseID:  id,
++		Instance: l.instance,
++		Keys:     keys,
++		Token: ProtectedRevokeToken{
++			LeaseID:        id,
++			Instance:       l.instance,
++			BindingVersion: bindingVersion,
++		},
++	}, nil
++}
++
++func (le *lessor) ProtectedRevoke(token ProtectedRevokeToken) error {
++	if token.LeaseID == NoLease || token.Instance == 0 {
++		return ErrProtectedRevokeTokenInvalid
++	}
++
++	// Phase 1: validate the credential and freeze the decision under le.mu.
++	// The revoking mark rejects every new Attach until the lease is removed, so
++	// no binding can be inserted between the check and the deletion. In a
++	// running server raft apply serializes the whole operation as well.
++	le.mu.Lock()
++	l := le.leaseMap[token.LeaseID]
++	if l == nil || l.revoking {
++		// Covers an expired lease already revoked, a never-existing ID, a
++		// duplicate revoke and a revoke racing another in-flight revoke.
++		le.mu.Unlock()
++		return ErrLeaseNotFound
++	}
++	if l.instance != token.Instance {
++		le.mu.Unlock()
++		return ErrLeaseInstanceMismatch
++	}
++	if l.BindingVersion() != token.BindingVersion {
++		le.mu.Unlock()
++		return ErrLeaseBindingsChanged
++	}
++	l.revoking = true
++	// The version was just verified, so this sorted snapshot contains exactly
++	// the previewed keys; only those keys are deleted.
++	keys, _ := l.bindingSnapshot()
++	le.mu.Unlock()
++
++	// Phase 2: delete the previewed keys. le.mu must stay released here because
++	// the mvcc delete path calls back into GetLease/Detach.
++	if le.rd == nil {
++		// Same degenerate behavior as Revoke when no deleter is wired: there
++		// is nothing to delete, so lift the freeze and leave the lease alone.
++		le.mu.Lock()
++		l.revoking = false
++		close(l.revokec)
++		le.mu.Unlock()
++		return nil
++	}
++
++	txn := le.rd()
++	for _, key := range keys {
++		txn.DeleteRange([]byte(key), nil)
++	}
++
++	// Phase 3: finalize while holding le.mu, just like Revoke: the lease-map
++	// deletion, the persisted lease deletion and the kv transaction all commit
++	// together. Re-check that another revoke did not remove the lease while the
++	// deletion was in progress.
++	le.mu.Lock()
++	defer le.mu.Unlock()
++	if cur := le.leaseMap[token.LeaseID]; cur != l {
++		txn.End()
++		return ErrLeaseNotFound
++	}
++	delete(le.leaseMap, l.ID)
++	// lease deletion needs to be in the same backend transaction with the
++	// kv deletion. Or we might end up with not executing the revoke or not
++	// deleting the keys if etcdserver fails in between.
++	schema.UnsafeDeleteLease(le.b.BatchTx(), &leasepb.Lease{ID: int64(l.ID)})
++
++	txn.End()
++	close(l.revokec)
++
++	leaseRevoked.Inc()
++	return nil
++}
++
+ func (le *lessor) Checkpoint(id LeaseID, remainingTTL int64) error {
+ 	le.mu.Lock()
+ 	defer le.mu.Unlock()
+ 
+@@ -559,14 +700,20 @@ func (le *lessor) Attach(id LeaseID, items []LeaseItem) error {
+ 	l := le.leaseMap[id]
+ 	if l == nil {
+ 		return ErrLeaseNotFound
+ 	}
++	if l.revoking {
++		// A protected revoke has frozen this lease: a new binding must not be
++		// inserted while its previewed keys are being deleted.
++		return ErrLeaseNotFound
++	}
+ 
+ 	l.mu.Lock()
+ 	for _, it := range items {
+-		l.itemSet[it] = struct{}{}
++		// Keep the reverse index in sync even if the item is already attached.
+ 		le.itemMap[it] = id
+ 	}
++	l.attachItemsLocked(items)
+ 	l.mu.Unlock()
+ 	return nil
+ }
+ 
+@@ -589,11 +736,15 @@ func (le *lessor) Detach(id LeaseID, items []LeaseItem) error {
+ 	}
+ 
+ 	l.mu.Lock()
+ 	for _, it := range items {
+-		delete(l.itemSet, it)
+-		delete(le.itemMap, it)
++		// Only drop the reverse index for items actually bound to this lease;
++		// the same key may have been re-attached to another lease already.
++		if _, ok := l.itemSet[it]; ok {
++			delete(le.itemMap, it)
++		}
+ 	}
++	l.detachItemsLocked(items)
+ 	l.mu.Unlock()
+ 	return nil
+ }
+ 
+@@ -811,19 +962,27 @@ func (le *lessor) initAndRecover() {
+ 	tx.LockOutsideApply()
+ 	schema.UnsafeCreateLeaseBucket(tx)
+ 	lpbs := schema.MustUnsafeGetAllLeases(tx)
+ 	tx.Unlock()
++	// Re-assign instance identities deterministically from the replicated
++	// backend: leases are iterated in the same (ascending lease-ID) order on
++	// every member, so a protected-revoke credential traveling through raft is
++	// validated to the same result cluster-wide. Runtime grants after recovery
++	// continue the same counter in raft apply order.
++	le.nextLeaseInstance = 0
+ 	for _, lpb := range lpbs {
+ 		ID := LeaseID(lpb.ID)
+ 		if lpb.TTL < le.minLeaseTTL {
+ 			lpb.TTL = le.minLeaseTTL
+ 		}
++		le.nextLeaseInstance++
+ 		le.leaseMap[ID] = &Lease{
+ 			ID:  ID,
+ 			ttl: lpb.TTL,
+ 			// itemSet will be filled in when recover key-value pairs
+ 			// set expiry to forever, refresh when promoted
+ 			itemSet:      make(map[LeaseItem]struct{}),
++			instance:     le.nextLeaseInstance,
+ 			expiry:       forever,
+ 			revokec:      make(chan struct{}),
+ 			remainingTTL: lpb.RemainingTTL,
+ 		}
+@@ -850,8 +1009,21 @@ func (fl *FakeLessor) Grant(id LeaseID, ttl int64) (*Lease, error) {
+ }
+ 
+ func (fl *FakeLessor) Revoke(id LeaseID) error { return nil }
+ 
++func (fl *FakeLessor) PreviewProtectedRevoke(id LeaseID) (*ProtectedRevokePreview, error) {
++	if _, ok := fl.LeaseSet[id]; !ok {
++		return nil, ErrLeaseNotFound
++	}
++	return &ProtectedRevokePreview{
++		LeaseID:  id,
++		Instance: 1,
++		Token:    ProtectedRevokeToken{LeaseID: id, Instance: 1},
++	}, nil
++}
++
++func (fl *FakeLessor) ProtectedRevoke(token ProtectedRevokeToken) error { return nil }
++
+ func (fl *FakeLessor) Checkpoint(id LeaseID, remainingTTL int64) error { return nil }
+ 
+ func (fl *FakeLessor) Attach(id LeaseID, items []LeaseItem) error { return nil }
+ 
+diff --git a/server/lease/protected_revoke.go b/server/lease/protected_revoke.go
+new file mode 100644
+index 000000000..8012d01a2
+--- /dev/null
++++ b/server/lease/protected_revoke.go
+@@ -0,0 +1,57 @@
++// Copyright 2026 The etcd Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package lease
++
++// ProtectedRevokeToken is the credential returned together with a protected
++// revoke preview. The caller must present it unchanged to ProtectedRevoke.
++//
++// The token binds together:
++//   - LeaseID: the lease the preview was taken for;
++//   - Instance: the exact granted lease instance, so a token cannot be replayed
++//     against a different lease granted with the same ID after revocation;
++//   - BindingVersion: the version of the lease's attached-key set at preview
++//     time, so any attach/detach (even a detach followed by a re-attach that
++//     restores the same key set) invalidates the token.
++//
++// Both Instance and BindingVersion advance only as a result of raft-applied
++// operations (Grant/Attach/Detach), so every member evaluating the token makes
++// the same decision as long as it applied the same raft prefix. When protected
++// revoke is exposed over raft, the binding version (and instance) must be
++// included in the replicated lease state, so members catching up through a
++// snapshot reconstruct the exact values the credential was issued against.
++//
++// A token is pure state: no preview record is kept server-side, so revoking or
++// expiring a lease leaves no lingering preview state. Tokens do not authorize
++// anything by themselves; callers must still enforce lease-revoke permissions
++// when issuing the preview and when carrying out the revoke.
++type ProtectedRevokeToken struct {
++	LeaseID        LeaseID
++	Instance       uint64
++	BindingVersion uint64
++}
++
++// ProtectedRevokePreview is returned by PreviewProtectedRevoke. It contains the
++// lease identity, the keys currently bound to the lease (sorted), and the
++// credential that must be presented to revoke the lease protectedly. Only the
++// keys listed here can be deleted by a successful ProtectedRevoke using Token.
++type ProtectedRevokePreview struct {
++	LeaseID LeaseID
++	// Instance identifies the exact granted lease instance the preview belongs to.
++	Instance uint64
++	// Keys is a sorted snapshot of the keys attached to the lease at preview time.
++	Keys []string
++	// Token is the credential to present to ProtectedRevoke.
++	Token ProtectedRevokeToken
++}

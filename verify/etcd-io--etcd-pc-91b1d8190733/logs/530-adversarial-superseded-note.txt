@@ -1,0 +1,8 @@
+﻿关于 530-adversarial-superseded.log 的说明
+==========================================
+该次运行的两条失败来自一个未接删除器的退化装配（lessor 未接 RangeDeleter）。其中的
+双重普通撤销 panic 来自 Revoke 中 defer close(l.revokec) 与 rd 为空时提前返回的组合：
+以同一命令在未改动的基线副本上核对，基线代码在该区域与交付版本逐字节相同，且
+mvcc.NewStore 在成员开始服务之前就接好删除器，因此该路径在真实成员中不可达。
+故该次运行的失败不作为被评估改动的缺陷，本文件仅作过程留档；结论以
+530-adv2.log（真实装配下经 mvcc 写入路径复现的崩溃）与 530-baseline-comparison.log 为准。

@@ -1,0 +1,27 @@
+﻿530 回归失败项与未改动基线副本的对照记录
+==================================================
+目的：判定 lease 包与 storage 包的两项既有用例失败是否为本次改动引入。
+方法：从交付提交的仓库直接检出基线 e9e56564d6f13af87747cdb785bc1832791090b4 到独立目录
+      （git worktree add --detach），把 Windows 下 client/v3 符号链接占位按同样方式补齐后，
+      以与交付副本完全相同的命令运行同一批用例。
+
+1) go test ./lease/ -run TestLessorCheckpointsRestoredOnPromote -count=1
+   交付副本：FAIL  lessor_test.go:600: expected expiry to be less than 1s in the future, but got 5.000000 seconds
+   基线副本：FAIL  lessor_test.go:600: expected expiry to be less than 1s in the future, but got 5.000000 seconds
+   结论：两处完全相同，属既有失败，与本次改动无关。
+
+2) go test ./storage/mvcc/ -run TestStoreRev -count=1
+   交付副本：FAIL  testing.go:1464: TempDir RemoveAll cleanup: unlinkat ...\database: The process cannot access
+                    the file because it is being used by another process.
+   基线副本：FAIL  testing.go:1464: TempDir RemoveAll cleanup: unlinkat ...\database: The process cannot access
+                    the file because it is being used by another process.
+   结论：两处完全相同，失败原因只是 Windows 下临时目录无法删除仍被占用的数据库文件，与本次改动无关。
+
+完整套件结果：go test ./lease/... ./storage/mvcc/... -count=1
+   ok  lease/leasehttp；lease 与 storage/mvcc 仅上述两项失败，其余全部通过。
+
+附：本次改动引入的并发缺陷证据（logs/530-adv2.log、logs/530-attach-panic-stack.txt）
+  panic: unexpected error from lease Attach
+  go.etcd.io/etcd/server/v3/storage/mvcc.(*storeTxnWrite).put
+      server/storage/mvcc/kvstore_txn.go:287
+  触发路径：保护性撤销进入删除阶段时对同一租约发起真实键值写入。
