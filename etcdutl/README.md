@@ -117,6 +117,58 @@ Prints a line of JSON encoding the database hash, revision, total keys, and size
 +----------+----------+------------+------------+
 ```
 
+### SNAPSHOT DIFF [options] \<filename-a\> \<filename-b\>
+
+SNAPSHOT DIFF compares the business keys of two offline snapshots and reports the actual keyspace changes instead of file level differences. Each side is read at a selectable revision (defaulting to the latest readable revision of that snapshot) and an optional byte key range can be applied to both sides.
+
+Differences are reported in key byte order as `added` (present only in B), `deleted` (present only in A) and `modified` keys. Modified keys distinguish value changes from create revision, mod revision, version and lease binding changes. The comparison is purely logical: identical keyspace state is never reported as different because of file page layout, free pages or historical compaction differences. Binary keys and values are preserved losslessly (base64 in JSON, Go quoted bytes in simple output), and each report states the requested/actual revisions of both sides and the compared range.
+
+Both input files are opened strictly read-only. Value payloads are streamed from the memory mapped files one pair at a time, so comparison memory does not grow with the total value volume. The report is published only after the comparison completed successfully: snapshot corruption, compacted or future revisions, output failures and cancellation all result in an error exit without a partial result (when writing to a file, the destination is replaced atomically).
+
+#### Options
+
+- rev-a -- Revision to read from snapshot A. Default 0 means the latest readable revision.
+- rev-b -- Revision to read from snapshot B. Default 0 means the latest readable revision.
+- range-start -- First key to compare, as hex bytes (e.g. `666f6f`). Defaults to the first key.
+- range-end -- Key range end (exclusive), as hex bytes. A single zero byte (`00`) means an open upper bound.
+- output, -o -- Write the report to the given file (published atomically) instead of standard output.
+
+#### Output
+
+##### Simple format
+
+Prints the side/revision header, the ordered change list and a counter summary.
+
+##### JSON format
+
+Prints a single JSON object with `status`, per-side revision info (`a`, `b`), the compared `range`, an ordered `changes` array and a machine readable `summary`. Keys and values are base64 encoded.
+
+#### Examples
+
+```bash
+# Compare the latest readable revisions of two snapshots
+./etcdutl snapshot dump-a.db dump-b.db
+# Snapshot diff (A => B)
+# A: path="dump-a.db" requested_revision=latest revision=4 ...
+# ...
+# MODIFIED key="/app/config"
+#          value: "v1" => "v2"
+#          mod_revision: 1 => 5
+# Summary: added=1 deleted=1 modified=3 ...
+# Result: DIFFERENT
+```
+
+```bash
+# Machine readable output, restricted to a key prefix, written to a file
+./etcdutl --write-out=json snapshot diff a.db b.db --range-start 2f617070 --range-end 00 --output diff.json
+# {"status":"complete", ... "summary":{"added":1,"deleted":0,"modified":1,"equal":false}}
+```
+
+```bash
+# Compare two historical revisions of the same snapshot
+./etcdutl snapshot diff db.db db.db --rev-a 100 --rev-b 200
+```
+
 ### HASHKV [options] \<filename\>
 
 HASHKV prints hash of keys and values up to given revision.

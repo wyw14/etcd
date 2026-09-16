@@ -52,6 +52,7 @@ func NewSnapshotCommand() *cobra.Command {
 	}
 	cmd.AddCommand(NewSnapshotRestoreCommand())
 	cmd.AddCommand(newSnapshotStatusCommand())
+	cmd.AddCommand(NewSnapshotDiffCommand())
 	return cmd
 }
 
