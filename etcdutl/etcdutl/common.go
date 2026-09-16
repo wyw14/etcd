@@ -90,6 +90,14 @@ func (sl *SimpleLessor) Grant(id lease.LeaseID, ttl int64) (*lease.Lease, error)
 
 func (sl *SimpleLessor) Revoke(id lease.LeaseID) error { return nil }
 
+// PreviewProtectedRevoke is unsupported by the offline simple lessor.
+func (sl *SimpleLessor) PreviewProtectedRevoke(id lease.LeaseID) (*lease.ProtectedRevokePreview, error) {
+	return nil, lease.ErrLeaseNotFound
+}
+
+// ProtectedRevoke mirrors the permissive Revoke behavior of the simple lessor.
+func (sl *SimpleLessor) ProtectedRevoke(token lease.ProtectedRevokeToken) error { return nil }
+
 func (sl *SimpleLessor) Checkpoint(id lease.LeaseID, remainingTTL int64) error { return nil }
 
 func (sl *SimpleLessor) Attach(id lease.LeaseID, items []lease.LeaseItem) error { return nil }

@@ -16,6 +16,7 @@ package lease
 
 import (
 	"math"
+	"sort"
 	"sync"
 	"time"
 
@@ -33,10 +34,27 @@ type Lease struct {
 	// expiry is time when lease should expire. no expiration when expiry.IsZero() is true
 	expiry time.Time
 
-	// mu protects concurrent accesses to itemSet
+	// mu protects concurrent accesses to itemSet and bindingVersion
 	mu      sync.RWMutex
 	itemSet map[LeaseItem]struct{}
-	revokec chan struct{}
+	// bindingVersion is bumped every time the attached item set changes, i.e.
+	// when a new item is attached or an attached item is detached. Re-attaching
+	// an item that is already attached (e.g. rewriting the value of a key that
+	// is already bound to the lease) and lease renewals do not bump it. It is
+	// used to invalidate protected-revoke credentials; detaching a key and
+	// later re-attaching it bumps the version twice, even if the resulting
+	// item set is identical.
+	bindingVersion uint64
+	// instance uniquely identifies one granted lease instance. A lease granted
+	// after a previous lease with the same ID was revoked gets a different
+	// instance. The value is assigned deterministically (in raft apply order)
+	// so all cluster members make the same protected-revoke decision.
+	instance uint64
+	// revoking is set by ProtectedRevoke once the credential has been accepted,
+	// freezing the lease against new bindings for the duration of the deletion.
+	// It is guarded by the lessor mutex.
+	revoking bool
+	revokec  chan struct{}
 }
 
 func NewLease(id LeaseID, ttl int64) *Lease {
@@ -111,6 +129,71 @@ func (l *Lease) Keys() []string {
 	}
 	l.mu.RUnlock()
 	return keys
+}
+
+// attachItemsLocked adds the given items to the lease's binding set. It returns
+// true when at least one item was not attached before, i.e. when the binding
+// relationship changed. bindingVersion is bumped exactly once in that case, so
+// re-attaching an already attached item (e.g. rewriting the value of a bound
+// key) does not invalidate protected-revoke credentials.
+// The caller must hold l.mu.
+func (l *Lease) attachItemsLocked(items []LeaseItem) (changed bool) {
+	for _, it := range items {
+		if _, ok := l.itemSet[it]; !ok {
+			l.itemSet[it] = struct{}{}
+			changed = true
+		}
+	}
+	if changed {
+		l.bindingVersion++
+	}
+	return changed
+}
+
+// detachItemsLocked removes the given items from the lease's binding set. It
+// returns true when at least one item was attached before. Detaching a key and
+// re-attaching it later bumps the binding version twice, even if the resulting
+// binding set is identical to the original.
+// The caller must hold l.mu.
+func (l *Lease) detachItemsLocked(items []LeaseItem) (changed bool) {
+	for _, it := range items {
+		if _, ok := l.itemSet[it]; ok {
+			delete(l.itemSet, it)
+			changed = true
+		}
+	}
+	if changed {
+		l.bindingVersion++
+	}
+	return changed
+}
+
+// bindingSnapshot returns a sorted copy of the keys attached to the lease and
+// the current binding version. The two values are read together so callers can
+// trust that the returned keys correspond to the returned version.
+func (l *Lease) bindingSnapshot() (keys []string, bindingVersion uint64) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	keys = make([]string, 0, len(l.itemSet))
+	for k := range l.itemSet {
+		keys = append(keys, k.Key)
+	}
+	sort.Strings(keys)
+	return keys, l.bindingVersion
+}
+
+// Instance returns the opaque identity of this granted lease instance. It is
+// immutable for the lifetime of the Lease object.
+func (l *Lease) Instance() uint64 {
+	return l.instance
+}
+
+// BindingVersion returns the current version of the lease's binding set. The
+// version is bumped on every actual attach/detach change.
+func (l *Lease) BindingVersion() uint64 {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.bindingVersion
 }
 
 // Remaining returns the remaining time of the lease.
