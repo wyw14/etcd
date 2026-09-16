@@ -137,6 +137,14 @@ type AuthStore interface {
 	// RoleDelete gets the detailed information of a role
 	RoleDelete(r *pb.AuthRoleDeleteRequest) (*pb.AuthRoleDeleteResponse, error)
 
+	// PreviewPermissionChanges computes a read-only preview of how a sequence
+	// of proposed role-permission and user-role membership changes would change
+	// the effective read and write key intervals of each affected user.
+	// It requires administrator privilege, never mutates the authorization
+	// configuration or caches and fails when its observation point is
+	// invalidated by a concurrent permission update.
+	PreviewPermissionChanges(ctx context.Context, authInfo *AuthInfo, changes []*PermissionPreviewChange) (*PermissionPreviewResult, error)
+
 	// UserList gets a list of all users
 	UserList(r *pb.AuthUserListRequest) (*pb.AuthUserListResponse, error)
 
