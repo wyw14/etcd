@@ -1,0 +1,60 @@
+========================================================================================================
+验证结论｜截图区域
+项目/题目：etcd-io/etcd  #529 管理员权限变更的有效访问区间预览   task_id：etcd-io--etcd-pc-57395beb9564
+完整 Session：
+  3313242430506617:3cb230fd6fd6e13aaa133d8184580ba3_6aa9563eda143c3bd08d0020.6aa95640da143c3bd08d0023.6aa9563eda143c3bd08d0021:TraeCode CN.3.3.100.no_sid.no_ppe.T(2026/9/15 22:29:20)
+验收日期：2026-09-16    评审者：本次独立验收（脚本化定向 Go 测试 + 真实授权路径交叉核对）
+被评估提交：运行副本尚无提交，基线 e9e56564d6f13af87747cdb785bc1832791090b4
+  模型改动补丁 model.patch SHA-256 1d55900b9d5be45700c20590eb6dd433f7935eb24c3ba7df0735ce3adc3fc6c7
+--------------------------------------------------------------------------------------------------------
+环境：Windows 11 (amd64) / Go 1.26.2 windows/amd64 / 仓库 etcd-io/etcd（server 模块 auth 包）
+      运行工作目录 precheck-529，分支 swe-like/legacy-20260904/etcd-t02
+有效轮数：64（tc-hook-kit valid_tc，PostToolUse+tool_use_id 去重，final_count_ready=true）
+独立验收测试：7 个测试（含 42 个子测试）全部通过，失败 0，错误 0，跳过 0
+模型自测：同题 auth 包 15 组用例全部通过
+回归测试：auth 包既有用例全部通过；apply 包因 Windows 符号链接占位限制无法加载，
+      与改动无关（已确认基线同样失败）
+--------------------------------------------------------------------------------------------------------
+Rubric 逐条判定（按冻结判据顺序，每条只出现一次）：
+[1] f2p 仅管理员使用：接收一组按顺序执行的拟议变更，在同一授权配置观察点计算变更前后每个
+        受影响用户的有效读、写区间，并分别报告新增和撤销的范围
+     实际：通过。TestZZV529PreviewMatchesRealAuthorization 用真实授权路径交叉核对：预览报告的
+           ReadBefore 在应用前可读、ReadAdded 应用前不可读应用后可读、ReadRevoked 应用后不可读、
+           ReadAfter 应用后可读且区间外键确实不可读；TestZZV529AdministratorsOnly 验证 root
+           与另一 root 持有者可用，普通用户与未知叫用者被拒且无结果
+[2] f2p 多个角色重叠授予的权限不能因为撤销其中一个角色就被误报为失去权限
+     实际：通过。TestZZV529PreviewMatchesRealAuthorization 的 overlapping roles 子测试中
+           wide[a,g)+overlap[c,e) 撤销 overlap 后报告无撤销，应用后 a/b/f 仍可读、g（开区间端点）
+           不可读；单角色双区间撤销时只报被撤区间的 a..c 丢失，e..g 保留
+[3] f2p 单键、前缀、无上界区间和根角色应与真实授权语义一致，输出中的区间需要归并且稳定排序
+     实际：通过。单键权限输出 EndRevision 为空（点语义），前缀输出 [pre,prf)，无上界输出
+           [tail,0x00] 且能读到 tail 之后的 zzzz；授予 root 角色后新增区间自 0x00 起且含开区间；
+           TestZZV529ResultsAreNormalizedAndStable 验证 4 个重叠/相邻区间归并为 [a,f)、用户按名
+           稳定排序（alpha、zeta）、重复同一请求结果一致、已被现有有效区间覆盖的授权不影响任何人
+[4] f2p 预览不得写入用户、角色或权限缓存，不改变授权修订，也不使现有令牌失效
+     实际：通过。TestZZV529PreviewIsReadOnly 连续三次预览后 auth revision 不变、角色权限仍为空、
+           用户角色归属不变、真实签发的 admin 令牌经 gRPC metadata 仍解析为 admin；预览后
+           拟议的读区间与写区间确实仍不可用；失败预览返回 nil 结果且修订不变
+[5] f2p 无效的拟议变更应明确指出且不输出可被当成成功的部分结果；并发权限更新造成观察点失效、
+        请求取消或结果达到配置上限时应明确终止并允许重试
+     实际：通过。TestZZV529InvalidChangesAreAtomicAndTyped 覆盖未知角色/未知用户/角色未授予/
+           权限未授予/缺少权限值/空键/未知变更类型/nil 变更，均返回带零基索引的
+           PermissionPreviewInvalidChangeError、errors.Is 可解包到具体哨兵错误且结果为 nil；
+           TestZZV529ObservationPointAndLimits 覆盖 context 取消（context.Canceled）、变更数超限
+           （128）、受影响用户超限（512）、结果区间超限（8192）、并发权限更新后修订前移并使
+           新观察点生效且并发重复预览全部成功
+[6] p2p 现有权限管理和数据访问行为不变
+     实际：通过。TestZZV529ExistingBehaviourUnchanged 验证 RoleGrantPermission 仍推进修订、
+           IsRangePermitted/IsPutPermitted 语义不变（读权限不授予写）、CheckPassword 拒绝错误口令
+           并返回当前修订、禁止认证的用户仍被 Authenticate 拒绝；auth 包既有用例全部通过；
+           AuthStore 接口仅新增一个方法，nop 实现仍满足接口
+--------------------------------------------------------------------------------------------------------
+总体结论：完成。冻结 rubric 六条的核心、兼容与回归项均满足，未发现本次改动引入的质量门失败。
+主要缺陷/缺失证据：
+  1) 环境限定限制（非本改动引入）：Windows 下 client/v3 符号链接占位使 etcdserver/apply 包
+     无法加载，该项回归以 auth 包既有用例与接口兼容检查替代，未在本机执行 apply 包用例。
+  2) 未覆盖项：未在 Linux 上重复执行同一套测试；并发观察点失效的确定性竞态窗口以串行化
+     修订前移加并发重复预览方式覆盖，未使用受控时钟注入。
+Type 资格：有效轮数 64（< 100），冻结 rubric 六条全部通过、完成度高，属「有效轮数 < 100 且 效果好」。
+========================================================================================================
+—— 验证结论结束 ——
